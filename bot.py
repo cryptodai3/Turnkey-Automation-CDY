@@ -1,22 +1,25 @@
 from web3 import Web3
-from eth_utils import to_hex
+from web3.exceptions import TransactionNotFound
 from eth_account import Account
-from aiohttp import ClientSession, ClientTimeout
+from aiohttp import ClientSession, ClientTimeout, ClientResponseError, BasicAuth
+from aiohttp_socks import ProxyConnector
 from datetime import datetime
 from colorama import *
-import asyncio, random, secrets, json, os, pytz
+import asyncio, random, json, re, os, pytz
 
 wib = pytz.timezone('Asia/Jakarta')
 
 class Turnkey:
     def __init__(self) -> None:
-        self.RPC_URL = "https://ethereum-sepolia-rpc.publicnode.com"
+        self.RPC_URL = "https://eth-sepolia.g.alchemy.com/v2/KatanYBT5TYSiPJ8Lr8iE_-kebTVnVvq"
+        self.RECEIVER = "0x08d2b0a37F869FF76BACB5Bab3278E26ab7067B7"
         self.ERC20_CONTRACT_ABI = json.loads('''[
             {"type":"function","name":"balanceOf","stateMutability":"view","inputs":[{"name":"address","type":"address"}],"outputs":[{"name":"","type":"uint256"}]}
         ]''')
         self.proxies = []
         self.proxy_index = 0
         self.account_proxies = {}
+        self.used_nonce = {}
         self.tx_count = 0
         self.min_amount = 0
         self.max_amount = 0
@@ -34,14 +37,15 @@ class Turnkey:
         )
 
     def welcome(self):
-        print(
-            f"""
-        {Fore.GREEN + Style.BRIGHT}Turnkey{Fore.BLUE + Style.BRIGHT} Automation Bot
-            """
-            f"""
-        {Fore.GREEN + Style.BRIGHT}Creator {Fore.YELLOW + Style.BRIGHT}<YetiDAO X Cryptodai3>
-            """
-        )
+        print(Fore.LIGHTGREEN_EX + Style.BRIGHT + "\n" + "═" * 60)
+        print(Fore.GREEN + Style.BRIGHT + "    ⚡Turnkey Automation BOT ⚡")
+        print(Fore.CYAN + Style.BRIGHT + "    ────────────────────────────────")
+        print(Fore.YELLOW + Style.BRIGHT + "    🧠 Project    : Turnkey - Automation Bot")
+        print(Fore.YELLOW + Style.BRIGHT + "    🧑‍💻 Author     : YetiDAO")
+        print(Fore.YELLOW + Style.BRIGHT + "    🌐 Status     : Running & Monitering...")
+        print(Fore.CYAN + Style.BRIGHT + "    ────────────────────────────────")
+        print(Fore.MAGENTA + Style.BRIGHT + "    🧬 Powered by Cryptodai3 × YetiDAO | Buddy v1.0 🚀")
+        print(Fore.LIGHTGREEN_EX + Style.BRIGHT + "═" * 60 + "\n")
 
     def format_seconds(self, seconds):
         hours, remainder = divmod(seconds, 3600)
@@ -53,7 +57,7 @@ class Turnkey:
         try:
             if use_proxy_choice == 1:
                 async with ClientSession(timeout=ClientTimeout(total=30)) as session:
-                    async with session.get("https://api.proxyscrape.com/v4/free-proxy-list/get?request=display_proxies&proxy_format=protocolipport&format=text") as response:
+                    async with session.get("https://raw.githubusercontent.com/monosans/proxy-list/refs/heads/main/proxies/http.txt") as response:
                         response.raise_for_status()
                         content = await response.text()
                         with open(filename, 'w') as f:
@@ -102,6 +106,26 @@ class Turnkey:
         self.proxy_index = (self.proxy_index + 1) % len(self.proxies)
         return proxy
     
+    def build_proxy_config(self, proxy=None):
+        if not proxy:
+            return None, None, None
+
+        if proxy.startswith("socks"):
+            connector = ProxyConnector.from_url(proxy)
+            return connector, None, None
+
+        elif proxy.startswith("http"):
+            match = re.match(r"http://(.*?):(.*?)@(.*)", proxy)
+            if match:
+                username, password, host_port = match.groups()
+                clean_url = f"http://{host_port}"
+                auth = BasicAuth(username, password)
+                return None, clean_url, auth
+            else:
+                return None, proxy, None
+
+        raise Exception("Unsupported Proxy Type.")
+    
     def generate_address(self, account: str):
         try:
             account = Account.from_key(account)
@@ -110,22 +134,11 @@ class Turnkey:
             return address
         except Exception as e:
             self.log(
-                f"{Fore.CYAN+Style.BRIGHT}Status    :{Style.RESET_ALL}"
+                f"{Fore.CYAN+Style.BRIGHT}Status:{Style.RESET_ALL}"
                 f"{Fore.RED+Style.BRIGHT} Generate Address Failed {Style.RESET_ALL}"
                 f"{Fore.MAGENTA+Style.BRIGHT}-{Style.RESET_ALL}"
                 f"{Fore.YELLOW+Style.BRIGHT} {str(e)} {Style.RESET_ALL}                  "
             )
-            return None
-        
-    def generate_random_receiver(self):
-        try:
-            private_key_bytes = secrets.token_bytes(32)
-            private_key_hex = to_hex(private_key_bytes)
-            account = Account.from_key(private_key_hex)
-            receiver = account.address
-            
-            return receiver
-        except Exception as e:
             return None
         
     def mask_account(self, account):
@@ -168,29 +181,53 @@ class Turnkey:
             )
             return None
         
-    async def perform_transfer(self, account: str, address: str, receiver: str, tx_amount: float, use_proxy: bool):
+    async def send_raw_transaction_with_retries(self, account, web3, tx, retries=5):
+        for attempt in range(retries):
+            try:
+                signed_tx = web3.eth.account.sign_transaction(tx, account)
+                raw_tx = web3.eth.send_raw_transaction(signed_tx.raw_transaction)
+                tx_hash = web3.to_hex(raw_tx)
+                return tx_hash
+            except TransactionNotFound:
+                pass
+            except Exception as e:
+                pass
+            await asyncio.sleep(2 ** attempt)
+        raise Exception("Transaction Hash Not Found After Maximum Retries")
+
+    async def wait_for_receipt_with_retries(self, web3, tx_hash, retries=5):
+        for attempt in range(retries):
+            try:
+                receipt = await asyncio.to_thread(web3.eth.wait_for_transaction_receipt, tx_hash, timeout=300)
+                return receipt
+            except TransactionNotFound:
+                pass
+            except Exception as e:
+                pass
+            await asyncio.sleep(2 ** attempt)
+        raise Exception("Transaction Receipt Not Found After Maximum Retries")
+        
+    async def perform_transfer(self, account: str, address: str, tx_amount: float, use_proxy: bool):
         try:
             web3 = await self.get_web3_with_check(address, use_proxy)
             
             amount_to_wei = web3.to_wei(tx_amount, "ether")
-            max_priority_fee = web3.to_wei(1.5, "gwei")
-            max_fee = max_priority_fee
 
             tx = {
-                "to": receiver,
+                "to": self.RECEIVER,
                 "value": amount_to_wei,
-                "nonce": web3.eth.get_transaction_count(address, "pending"),
                 "gas": 21000,
-                "maxFeePerGas": int(max_fee),
-                "maxPriorityFeePerGas": int(max_priority_fee),
+                "maxFeePerGas": web3.to_wei(0.002, "gwei"),
+                "maxPriorityFeePerGas": web3.to_wei(0.001, "gwei"),
+                "nonce": self.used_nonce[address],
                 "chainId": web3.eth.chain_id
             }
 
-            signed_tx = web3.eth.account.sign_transaction(tx, account)
-            raw_tx = web3.eth.send_raw_transaction(signed_tx.raw_transaction)
-            tx_hash = web3.to_hex(raw_tx)
-            receipt = await asyncio.to_thread(web3.eth.wait_for_transaction_receipt, tx_hash, timeout=300)
+            tx_hash = await self.send_raw_transaction_with_retries(account, web3, tx)
+            receipt = await self.wait_for_receipt_with_retries(web3, tx_hash)
+
             block_number = receipt.blockNumber
+            self.used_nonce[address] += 1
 
             return tx_hash, block_number
         except Exception as e:
@@ -290,10 +327,55 @@ class Turnkey:
             except ValueError:
                 print(f"{Fore.RED + Style.BRIGHT}Invalid input. Enter a number (1, 2 or 3).{Style.RESET_ALL}")
 
-        return choose
+        rotate = False
+        if choose in [1, 2]:
+            while True:
+                rotate = input(f"{Fore.BLUE + Style.BRIGHT}Rotate Invalid Proxy? [y/n] -> {Style.RESET_ALL}").strip()
+
+                if rotate in ["y", "n"]:
+                    rotate = rotate == "y"
+                    break
+                else:
+                    print(f"{Fore.RED + Style.BRIGHT}Invalid input. Enter 'y' or 'n'.{Style.RESET_ALL}")
+
+        return choose, rotate
     
-    async def process_perform_transfer(self, account: str, address: str, receiver: str, tx_amount: float, use_proxy: bool):
-        tx_hash, block_number = await self.perform_transfer(account, address, receiver, tx_amount, use_proxy)
+    async def check_connection(self, proxy_url=None):
+        connector, proxy, proxy_auth = self.build_proxy_config(proxy_url)
+        try:
+            async with ClientSession(connector=connector, timeout=ClientTimeout(total=10)) as session:
+                async with session.get(url="https://api.ipify.org?format=json", proxy=proxy, proxy_auth=proxy_auth) as response:
+                    response.raise_for_status()
+                    return True
+        except (Exception, ClientResponseError) as e:
+            self.log(
+                f"{Fore.CYAN+Style.BRIGHT}Status:{Style.RESET_ALL}"
+                f"{Fore.RED+Style.BRIGHT} Connection Not 200 OK {Style.RESET_ALL}"
+                f"{Fore.MAGENTA+Style.BRIGHT}-{Style.RESET_ALL}"
+                f"{Fore.YELLOW+Style.BRIGHT} {str(e)} {Style.RESET_ALL}"
+            )
+            return None
+        
+    async def process_check_connection(self, address: int, use_proxy: bool, rotate_proxy: bool):
+        while True:
+            proxy = self.get_next_proxy_for_account(address) if use_proxy else None
+            self.log(
+                f"{Fore.CYAN + Style.BRIGHT}Proxy :{Style.RESET_ALL}"
+                f"{Fore.WHITE + Style.BRIGHT} {proxy} {Style.RESET_ALL}"
+            )
+
+            is_valid = await self.check_connection(proxy)
+            if not is_valid:
+                if rotate_proxy:
+                    proxy = self.rotate_proxy_for_account(address)
+                    continue
+
+                return False
+            
+            return True
+    
+    async def process_perform_transfer(self, account: str, address: str, tx_amount: float, use_proxy: bool):
+        tx_hash, block_number = await self.perform_transfer(account, address, tx_amount, use_proxy)
         if tx_hash and block_number:
             explorer = f"https://sepolia.etherscan.io/tx/{tx_hash}"
             self.log(
@@ -318,51 +400,61 @@ class Turnkey:
                 f"{Fore.RED+Style.BRIGHT} Perform On-Chain Failed {Style.RESET_ALL}"
             )
 
-    async def process_accounts(self, account: str, address: str, use_proxy: bool):
-        for i in range(self.tx_count):
-            self.log(
-                f"{Fore.MAGENTA+Style.BRIGHT} ● {Style.RESET_ALL}"
-                f"{Fore.GREEN+Style.BRIGHT}Transfer{Style.RESET_ALL}"
-                f"{Fore.WHITE+Style.BRIGHT} {i+1} {Style.RESET_ALL}"
-                f"{Fore.MAGENTA+Style.BRIGHT}Of{Style.RESET_ALL}"
-                f"{Fore.WHITE+Style.BRIGHT} {self.tx_count} {Style.RESET_ALL}                                   "
-            )
-
-            balance = await self.get_token_balance(address, use_proxy)
-
-            tx_amount = round(random.uniform(self.min_amount, self.max_amount), 7)
-
-            receiver = self.generate_random_receiver()
-
-            self.log(
-                f"{Fore.CYAN+Style.BRIGHT}   Balance :{Style.RESET_ALL}"
-                f"{Fore.WHITE+Style.BRIGHT} {balance} ETH Sepolia {Style.RESET_ALL}"
-            )
-            self.log(
-                f"{Fore.CYAN+Style.BRIGHT}   Amount  :{Style.RESET_ALL}"
-                f"{Fore.WHITE+Style.BRIGHT} {tx_amount} ETH Sepolia {Style.RESET_ALL}"
-            )
-            self.log(
-                f"{Fore.CYAN+Style.BRIGHT}   Receiver:{Style.RESET_ALL}"
-                f"{Fore.WHITE+Style.BRIGHT} {receiver} {Style.RESET_ALL}"
-            )
-
-            if not balance or balance <= tx_amount:
+    async def process_accounts(self, account: str, address: str, use_proxy: bool, rotate_proxy: bool):
+        is_valid = await self.process_check_connection(address, use_proxy, rotate_proxy)
+        if is_valid:
+            web3 = await self.get_web3_with_check(address, use_proxy)
+            if not web3:
                 self.log(
-                    f"{Fore.CYAN+Style.BRIGHT}   Status  :{Style.RESET_ALL}"
-                    f"{Fore.YELLOW+Style.BRIGHT} Insufficient ETH Sepolia Token Balance {Style.RESET_ALL}"
+                    f"{Fore.CYAN + Style.BRIGHT}Status:{Style.RESET_ALL}"
+                    f"{Fore.RED + Style.BRIGHT} Web3 Not Connected {Style.RESET_ALL}"
                 )
                 return
             
-            await self.process_perform_transfer(account, address, receiver, tx_amount, use_proxy)
-            await self.print_timer()
+            self.used_nonce[address] = web3.eth.get_transaction_count(address, "pending")
+
+            for i in range(self.tx_count):
+                self.log(
+                    f"{Fore.MAGENTA+Style.BRIGHT} ● {Style.RESET_ALL}"
+                    f"{Fore.GREEN+Style.BRIGHT}Transfer{Style.RESET_ALL}"
+                    f"{Fore.WHITE+Style.BRIGHT} {i+1} {Style.RESET_ALL}"
+                    f"{Fore.MAGENTA+Style.BRIGHT}Of{Style.RESET_ALL}"
+                    f"{Fore.WHITE+Style.BRIGHT} {self.tx_count} {Style.RESET_ALL}                                   "
+                )
+
+                balance = await self.get_token_balance(address, use_proxy)
+
+                tx_amount = round(random.uniform(self.min_amount, self.max_amount), 7)
+
+                self.log(
+                    f"{Fore.CYAN+Style.BRIGHT}   Balance :{Style.RESET_ALL}"
+                    f"{Fore.WHITE+Style.BRIGHT} {balance} ETH Sepolia {Style.RESET_ALL}"
+                )
+                self.log(
+                    f"{Fore.CYAN+Style.BRIGHT}   Amount  :{Style.RESET_ALL}"
+                    f"{Fore.WHITE+Style.BRIGHT} {tx_amount} ETH Sepolia {Style.RESET_ALL}"
+                )
+                self.log(
+                    f"{Fore.CYAN+Style.BRIGHT}   Receiver:{Style.RESET_ALL}"
+                    f"{Fore.WHITE+Style.BRIGHT} {self.RECEIVER} {Style.RESET_ALL}"
+                )
+
+                if not balance or balance <= tx_amount:
+                    self.log(
+                        f"{Fore.CYAN+Style.BRIGHT}   Status  :{Style.RESET_ALL}"
+                        f"{Fore.YELLOW+Style.BRIGHT} Insufficient ETH Sepolia Token Balance {Style.RESET_ALL}"
+                    )
+                    return
+                
+                await self.process_perform_transfer(account, address, tx_amount, use_proxy)
+                await self.print_timer()
 
     async def main(self):
         try:
             with open('accounts.txt', 'r') as file:
                 accounts = [line.strip() for line in file if line.strip()]
 
-            use_proxy_choice = self.print_question()
+            use_proxy_choice, rotate_proxy = self.print_question()
 
             use_proxy = False
             if use_proxy_choice in [1, 2]:
@@ -392,12 +484,12 @@ class Turnkey:
 
                         if not address:
                             self.log(
-                                f"{Fore.CYAN + Style.BRIGHT}Status    :{Style.RESET_ALL}"
+                                f"{Fore.CYAN + Style.BRIGHT}Status:{Style.RESET_ALL}"
                                 f"{Fore.RED + Style.BRIGHT} Invalid Private Key or Library Version Not Supported {Style.RESET_ALL}"
                             )
                             continue
 
-                        await self.process_accounts(account, address, use_proxy)
+                        await self.process_accounts(account, address, use_proxy, rotate_proxy)
                         await asyncio.sleep(3)
 
                 self.log(f"{Fore.CYAN + Style.BRIGHT}={Style.RESET_ALL}"*72)
